@@ -1,0 +1,137 @@
+import os
+from django.shortcuts import render, redirect
+from django.conf import settings
+from django.core.files.base import ContentFile
+from .forms import ImagePromptForm
+from .models import GeneratedImage
+from dotenv import load_dotenv
+
+# Not needed for the current implementation
+# from openai import OpenAI
+# import requests
+
+# Needed for Vertex AI google cloud (requires loaded service account credentials)
+import base64
+import vertexai
+from vertexai.generative_models import GenerativeModel
+from google.api_core import exceptions  # Import Google Cloud exceptions
+
+# Load environment variables from .env file
+load_dotenv()
+
+# --- Google Cloud Vertex AI Setup ---
+# Get project ID and location from environment variables
+PROJECT_ID = os.getenv("GOOGLE_CLOUD_PROJECT_ID")
+LOCATION = os.getenv("GOOGLE_CLOUD_LOCATION")
+
+# Initialize Vertex AI
+# Ensure GOOGLE_APPLICATION_CREDENTIALS environment variable is set
+try:
+    vertexai.init(project=PROJECT_ID, location=LOCATION)
+    # Load the Imagen model using the GenerativeModel class
+    # 'imagegeneration' is the model name, check documentation for the latest
+    image_model = GenerativeModel("imagegeneration")
+    print(f"Vertex AI initialized for project {PROJECT_ID} in {LOCATION}")
+except exceptions.GoogleCloudError as e:
+    print(f"Error initializing Vertex AI: {e}")
+    # Handle this error appropriately in a real application (e.g., log, fail gracefully)
+    image_model = None  # Ensure image_model is None if initialization fails
+
+# --- End Google Cloud Vertex AI Setup ---
+
+# Initialize the OpenAI client with API key from environment variable
+# client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+
+def home(request):
+    if request.method == "POST":
+        form = ImagePromptForm(request.POST)
+        if form.is_valid():
+            prompt = form.cleaned_data["prompt"]
+
+            # Generate image using Google Vertex AI (Imagen)
+            try:
+                if (
+                    image_model
+                ):  # Only attempt generation if model was loaded successfully
+                    generated_image = generate_image(prompt)
+                    # Redirect or return success response
+                    return redirect("gallery")  # Or wherever you show the result
+                else:
+                    # Handle the case where Vertex AI initialization failed
+                    return render(
+                        request,
+                        "image_generator/error.html",
+                        {"error": "Image generation service not available."},
+                    )
+
+            except Exception as e:
+                # Catch specific Google Cloud exceptions if needed for finer error handling
+                # print(f"Image generation failed: {e}") # Log the error
+                return render(
+                    request,
+                    "image_generator/error.html",
+                    {"error": f"Image generation failed: {str(e)}"},
+                )
+    else:
+        form = ImagePromptForm()
+
+    # Pass the form to the template
+    return render(request, "image_generator/home.html", {"form": form})
+
+
+def generate_image(prompt):
+    """
+    Generates an image using Google Vertex AI (Imagen).
+    """
+    if not image_model:
+        raise Exception("Vertex AI Image Generation model not loaded.")
+
+    try:
+        # Call Vertex AI Imagen model to generate images
+        # The parameters are different from OpenAI's DALL-E
+        # Refer to Vertex AI Imagen documentation for available parameters
+        # This returns a response object with generated content
+        response = image_model.generate_content(
+            prompt,
+        )
+        # Get the image generation results
+        images = response.candidates
+
+        # The response contains image data directly, typically as bytes_content (base64 encoded)
+        if images and images.images:
+            # Get the first generated image data (base64 encoded)
+            image_data_base64 = images.images[0].bytes_content
+        # The response contains image data in the candidates list
+        if images:
+            # Get the first generated image data (base64 encoded)
+            image_data_base64 = images[0].content.parts[0].data
+            # Convert base64 to bytes
+            image_bytes = base64.b64decode(image_data_base64)
+            # Create a new GeneratedImage instance
+            generated_image = GeneratedImage(prompt=prompt)
+
+            # Save the image data to the ImageField
+            # Use a suitable file name
+            generated_image.image.save(
+                f"generated_{generated_image.id}.png",  # Django will handle unique naming if needed
+                ContentFile(image_bytes),
+            )
+            generated_image.save()
+
+            return generated_image
+        else:
+            raise Exception("No images were generated by the API.")
+
+    except exceptions.GoogleCloudError as e:
+        # Catch specific Google Cloud API errors
+        raise Exception(f"Google Cloud API Error: {e}")
+    except Exception as e:
+        # Catch any other errors during processing
+        raise Exception(f"Image processing error: {e}")
+
+
+# Keep the gallery view as is, it interacts with your model
+def gallery(request):
+    images = GeneratedImage.objects.all().order_by("-created_at")
+    return render(request, "image_generator/gallery.html", {"images": images})
